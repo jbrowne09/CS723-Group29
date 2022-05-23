@@ -1,0 +1,151 @@
+module group29_cruiseControl:
+
+%External Dependencies
+type states;
+
+%set enum state value:
+%1 = OFF
+%2 = ON
+%3 = STDBY
+%4 = DISABLED
+procedure setState(states)(integer);
+function regulateThrottle(integer, float, float):float;
+
+%IO Declaration
+input Accel:=0.0f: float;
+input Brake:=0.0f: float;
+input Speed:=0.0f: float;
+input On, Off, Resume, Set, QuickAccel, QuickDecel;
+output CruiseSpeed: float; 
+output ThrottleCmd: float;
+output CruiseState: states;
+
+%Internal Signals
+signal AccelP, BrakeP, SpeedBound, active, regulate, reference := 0.0f : float in
+
+%Pedal Handler
+[
+loop
+	if ?Accel >= 3.0f then
+		emit AccelP;
+	end if;
+	if ?Brake >= 3.0f then 
+		emit BrakeP;
+	end if;
+	await tick;
+end loop
+]
+
+||
+
+%Control Unit
+[
+loop
+var state: states in
+	abort
+		call setState(state)(1);
+		sustain CruiseState(state);
+	when immediate On do
+		call setState(state)(2);
+	end abort;
+	abort 
+		loop
+		present
+		case not AccelP and not BrakeP and not pre(SpeedBound) do
+			call setState(state)(2);
+			emit active;
+			emit regulate;
+		case AccelP or pre(SpeedBound) do 
+			call setState(state)(4);
+			emit active;
+		case BrakeP and not (AccelP or pre(SpeedBound)) do
+			call setState(state)(3);
+
+			abort
+			loop
+				emit active;
+				emit CruiseState(state);
+				await tick;
+			end loop
+			when Resume do
+				present
+				case not AccelP and not SpeedBound do
+					call setState(state)(2);
+					emit regulate;
+					emit active;
+				case AccelP or SpeedBound do
+					call setState(state)(4);
+					emit active;
+				end present;
+			end abort;
+		end present;
+		emit CruiseState(state);
+		await tick;
+		end loop
+	when Off do
+		call setState(state)(1);
+	end abort;
+end var
+end loop
+]
+
+||
+
+%Speed Control
+[
+loop
+	present
+	case active and (Set or On) do
+		if ?Speed < 150.0f and ?Speed > 30.0f then
+			emit reference(?Speed);
+		elsif ?Speed >= 150.0f then
+			emit reference(150.0f);
+		elsif ?Speed <= 30.0f then
+			emit reference(30.0f);
+		end if;
+	case active and QuickDecel and not Set do
+		if pre(?reference)-2.5f <= 30.0f then
+			emit reference(30.0f);
+		else
+			emit reference(pre(?reference) - 2.5f);
+		end if;
+	case active and QuickAccel and not QuickDecel and not Set do
+		if pre(?reference)+2.5f >= 150.0f then
+			emit reference(150.0f);
+		else
+			emit reference(pre(?reference) + 2.5f);
+		end if;
+	end present;
+
+	if ?Speed > 150.0f or ?Speed < 30.0f then
+		emit SpeedBound;
+	end if;
+
+	present 
+	case active do
+		emit CruiseSpeed(?reference);
+	case not active do
+		emit CruiseSpeed(0.0f);
+	end present;
+	await tick;
+end loop
+]
+
+||
+
+%Throttle Control
+[
+loop
+	present 
+	case regulate and On do
+		emit ThrottleCmd(regulateThrottle(1, ?reference, ?Speed));
+	case regulate and not On do
+		emit ThrottleCmd(regulateThrottle(0, ?reference, ?Speed));
+	case not regulate do
+		emit ThrottleCmd(?Accel);
+	end present;
+	await tick;
+end loop	
+]
+end signal
+end module
